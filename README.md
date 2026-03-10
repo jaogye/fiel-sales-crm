@@ -33,26 +33,26 @@ The owner sees everything in real-time on their laptop dashboard — **zero phon
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │                    📱 MOBILE APP (per rep)                   │
 │            React Native + Expo (iOS & Android)               │
 │                                                              │
 │  expo-contacts ─── expo-linking ─── expo-location ─── expo-av│
 │       │                │                │              │     │
-│   Sync phone      Track calls      Geofencing      Record   │
+│   Sync phone      Track calls      Geofencing      Record    │
 │   contacts       (appointment?)   (detect arrival)   audio   │
 │                                                              │
-│              WatermelonDB (offline SQLite sync)               │
+│              WatermelonDB (offline SQLite sync)              │
 └──────────────────────┬───────────────────────────────────────┘
                        │ HTTP sync when online
 ┌──────────────────────▼───────────────────────────────────────┐
-│              💻 BACKEND (owner's Windows laptop)              │
-│                    FastAPI + SQLite                           │
+│              💻 BACKEND (owner's Windows laptop)             │
+│                    FastAPI + SQLite                          │
 │                                                              │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
-│  │  REST API   │  │ Whisper API  │  │   GPT-4o-mini API   │ │
-│  │  /api/v1/*  │  │ Audio → Text │  │ Text → JSON fields  │ │
-│  └──────┬──────┘  └──────┬───────┘  └──────────┬──────────┘ │
+│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐  │
+│  │  REST API   │  │ Whisper API  │  │   GPT-4o-mini API   │  │
+│  │  /api/v1/*  │  │ Audio → Text │  │ Text → JSON fields  │  │
+│  └──────┬──────┘  └──────┬───────┘  └──────────┬──────────┘  │
 │         │                │                      │            │
 │         ▼                ▼                      ▼            │
 │    ┌─────────────────────────────────────────────────┐       │
@@ -60,7 +60,7 @@ The owner sees everything in real-time on their laptop dashboard — **zero phon
 │    │  vendedores │ clientes │ llamadas │ visitas     │       │
 │    └─────────────────────────────────────────────────┘       │
 │                          │                                   │
-│              Streamlit Dashboard (localhost:8501)             │
+│              Streamlit Dashboard (localhost:8501)            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
