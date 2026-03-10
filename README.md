@@ -246,4 +246,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## Author
 
-Built by [Juan Alvarado](https://www.linkedin.com/in/juan-alvarado-71a5a629/) — PhD Mathematician, independent contractor specializing in data engineering and AI systems.
+Built by [Juan Alvarado](https://www.linkedin.com/in/juan-alvarado-71a5a629/) — PhD Computer Science, independent contractor specializing in data engineering and AI systems.
