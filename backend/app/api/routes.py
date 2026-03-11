@@ -1,21 +1,28 @@
 """
 API routes for the Field Sales CRM.
 
-All endpoints that the mobile app calls to sync data.
+All endpoints (except registration and login) require a valid JWT token
+issued by POST /api/v1/auth/login.
 """
-import shutil
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, status
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.auth import (
+    get_current_vendedor,
+    hash_password,
+    verify_password,
+    create_access_token,
+)
 from app.models.models import Vendedor, Cliente, Llamada, Visita
 from app.schemas.schemas import (
     VendedorCreate, VendedorResponse,
+    LoginRequest, TokenResponse,
     ClienteCreate, ClienteResponse, ClienteUpdate, ContactSyncRequest,
     LlamadaCreate, LlamadaResponse,
     VisitaCreate, VisitaResponse,
@@ -25,13 +32,74 @@ from app.services.openai_service import process_visit_audio
 
 router = APIRouter(prefix="/api/v1")
 
+# ---------------------------------------------------------------------------
+# Audio magic-byte validation
+# ---------------------------------------------------------------------------
 
-# ============ VENDEDORES (Sales Reps) ============
+# Known signatures for common audio formats
+_AUDIO_MAGIC = [
+    b'\xff\xfb',            # MP3
+    b'\xff\xf3',            # MP3
+    b'\xff\xf2',            # MP3
+    b'\xff\xf1',            # AAC (ADTS)
+    b'\xff\xf9',            # AAC (ADTS)
+    b'ID3',                 # MP3 with ID3 tag
+    b'RIFF',                # WAV
+    b'OggS',                # OGG Vorbis / Opus
+    b'fLaC',                # FLAC
+    b'\x1a\x45\xdf\xa3',   # WebM / MKV
+]
+
+
+def _is_valid_audio(content: bytes) -> bool:
+    """Return True if *content* starts with a known audio magic signature."""
+    if len(content) < 12:
+        return False
+    header = content[:12]
+    # M4A / MP4 / AAC container: 'ftyp' box at bytes 4–7
+    if header[4:8] in (b'ftyp', b'moov', b'mdat', b'wide'):
+        return True
+    return any(header.startswith(sig) for sig in _AUDIO_MAGIC)
+
+
+# ---------------------------------------------------------------------------
+# AUTH
+# ---------------------------------------------------------------------------
+
+@router.post("/auth/login", response_model=TokenResponse, tags=["auth"])
+async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+    """Authenticate a sales rep and return a JWT access token."""
+    result = await db.execute(
+        select(Vendedor).where(Vendedor.telefono == data.telefono, Vendedor.activo == True)
+    )
+    vendedor = result.scalar_one_or_none()
+
+    # Use a constant-time comparison path to avoid user-enumeration timing attacks
+    if vendedor is None or not vendedor.password_hash:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    if not verify_password(data.password, vendedor.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    token = create_access_token(vendedor.id)
+    return TokenResponse(access_token=token, vendedor_id=vendedor.id)
+
+
+# ---------------------------------------------------------------------------
+# VENDEDORES (Sales Reps)
+# ---------------------------------------------------------------------------
 
 @router.post("/vendedores/", response_model=VendedorResponse, tags=["vendedores"])
 async def crear_vendedor(data: VendedorCreate, db: AsyncSession = Depends(get_db)):
-    """Register a new sales rep."""
-    vendedor = Vendedor(**data.model_dump())
+    """Register a new sales rep (public endpoint — used during onboarding)."""
+    existing = await db.execute(
+        select(Vendedor).where(Vendedor.telefono == data.telefono)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Phone number already registered")
+
+    payload = data.model_dump(exclude={"password"})
+    payload["password_hash"] = hash_password(data.password)
+    vendedor = Vendedor(**payload)
     db.add(vendedor)
     await db.flush()
     await db.refresh(vendedor)
@@ -42,15 +110,18 @@ async def crear_vendedor(data: VendedorCreate, db: AsyncSession = Depends(get_db
 async def listar_vendedores(
     activo: bool = True,
     db: AsyncSession = Depends(get_db),
+    _: Vendedor = Depends(get_current_vendedor),
 ):
-    """List all active sales reps."""
+    """List all active sales reps. Requires authentication."""
     result = await db.execute(
         select(Vendedor).where(Vendedor.activo == activo).order_by(Vendedor.nombre)
     )
     return result.scalars().all()
 
 
-# ============ CLIENTES (Clients) ============
+# ---------------------------------------------------------------------------
+# CLIENTES (Clients)
+# ---------------------------------------------------------------------------
 
 @router.get("/clientes/", response_model=list[ClienteResponse], tags=["clientes"])
 async def listar_clientes(
@@ -60,8 +131,9 @@ async def listar_clientes(
     limit: int = Query(100, le=500),
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    _: Vendedor = Depends(get_current_vendedor),
 ):
-    """List clients with optional filters."""
+    """List clients with optional filters. Requires authentication."""
     query = select(Cliente)
 
     if estado:
@@ -80,14 +152,17 @@ async def listar_clientes(
 
 
 @router.post("/clientes/", response_model=ClienteResponse, tags=["clientes"])
-async def crear_cliente(data: ClienteCreate, db: AsyncSession = Depends(get_db)):
-    """Create a new client."""
-    # Check if phone already exists
+async def crear_cliente(
+    data: ClienteCreate,
+    db: AsyncSession = Depends(get_db),
+    _: Vendedor = Depends(get_current_vendedor),
+):
+    """Create a new client. Requires authentication."""
     existing = await db.execute(
         select(Cliente).where(Cliente.telefono == data.telefono)
     )
     if existing.scalar_one_or_none():
-        raise HTTPException(400, "Client with this phone number already exists")
+        raise HTTPException(status_code=400, detail="Phone number already registered")
 
     cliente = Cliente(**data.model_dump())
     db.add(cliente)
@@ -101,12 +176,13 @@ async def actualizar_cliente(
     cliente_id: int,
     data: ClienteUpdate,
     db: AsyncSession = Depends(get_db),
+    _: Vendedor = Depends(get_current_vendedor),
 ):
-    """Update a client record."""
+    """Update a client record. Requires authentication."""
     result = await db.execute(select(Cliente).where(Cliente.id == cliente_id))
     cliente = result.scalar_one_or_none()
     if not cliente:
-        raise HTTPException(404, "Client not found")
+        raise HTTPException(status_code=404, detail="Client not found")
 
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(cliente, field, value)
@@ -118,11 +194,18 @@ async def actualizar_cliente(
 
 
 @router.post("/clientes/sync", tags=["clientes"])
-async def sync_contactos(data: ContactSyncRequest, db: AsyncSession = Depends(get_db)):
+async def sync_contactos(
+    data: ContactSyncRequest,
+    db: AsyncSession = Depends(get_db),
+    current_vendedor: Vendedor = Depends(get_current_vendedor),
+):
     """
     Bulk sync contacts from a sales rep's phone.
-    Creates new clients or skips if phone already exists.
+    The vendedor_id in the request must match the authenticated user.
     """
+    if data.vendedor_id != current_vendedor.id:
+        raise HTTPException(status_code=403, detail="Cannot sync contacts for another rep")
+
     created = 0
     skipped = 0
 
@@ -142,14 +225,20 @@ async def sync_contactos(data: ContactSyncRequest, db: AsyncSession = Depends(ge
     return {"created": created, "skipped": skipped, "total": len(data.contactos)}
 
 
-# ============ LLAMADAS (Calls) ============
+# ---------------------------------------------------------------------------
+# LLAMADAS (Calls)
+# ---------------------------------------------------------------------------
 
 @router.post("/llamadas/", response_model=LlamadaResponse, tags=["llamadas"])
-async def registrar_llamada(data: LlamadaCreate, db: AsyncSession = Depends(get_db)):
-    """
-    Log a call from a sales rep to a client.
-    Also updates the client's status based on the call result.
-    """
+async def registrar_llamada(
+    data: LlamadaCreate,
+    db: AsyncSession = Depends(get_db),
+    current_vendedor: Vendedor = Depends(get_current_vendedor),
+):
+    """Log a call. The vendedor_id must match the authenticated user."""
+    if data.vendedor_id != current_vendedor.id:
+        raise HTTPException(status_code=403, detail="Cannot log calls for another rep")
+
     llamada = Llamada(**data.model_dump())
     db.add(llamada)
 
@@ -174,17 +263,15 @@ async def registrar_llamada(data: LlamadaCreate, db: AsyncSession = Depends(get_
 
 @router.get("/llamadas/", response_model=list[LlamadaResponse], tags=["llamadas"])
 async def listar_llamadas(
-    vendedor_id: int = None,
     cliente_id: int = None,
     fecha_desde: datetime = None,
     limit: int = Query(50, le=200),
     db: AsyncSession = Depends(get_db),
+    current_vendedor: Vendedor = Depends(get_current_vendedor),
 ):
-    """List calls with optional filters."""
-    query = select(Llamada)
+    """List the authenticated rep's calls."""
+    query = select(Llamada).where(Llamada.vendedor_id == current_vendedor.id)
 
-    if vendedor_id:
-        query = query.where(Llamada.vendedor_id == vendedor_id)
     if cliente_id:
         query = query.where(Llamada.cliente_id == cliente_id)
     if fecha_desde:
@@ -195,11 +282,20 @@ async def listar_llamadas(
     return result.scalars().all()
 
 
-# ============ VISITAS (Visits) ============
+# ---------------------------------------------------------------------------
+# VISITAS (Visits)
+# ---------------------------------------------------------------------------
 
 @router.post("/visitas/", response_model=VisitaResponse, tags=["visitas"])
-async def crear_visita(data: VisitaCreate, db: AsyncSession = Depends(get_db)):
-    """Create a new visit record (triggered by GPS geofence)."""
+async def crear_visita(
+    data: VisitaCreate,
+    db: AsyncSession = Depends(get_db),
+    current_vendedor: Vendedor = Depends(get_current_vendedor),
+):
+    """Create a visit record. The vendedor_id must match the authenticated user."""
+    if data.vendedor_id != current_vendedor.id:
+        raise HTTPException(status_code=403, detail="Cannot create visits for another rep")
+
     visita = Visita(**data.model_dump())
     db.add(visita)
     await db.flush()
@@ -212,25 +308,34 @@ async def subir_audio(
     visita_id: int,
     audio: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    current_vendedor: Vendedor = Depends(get_current_vendedor),
 ):
     """
     Upload the recorded audio for a visit.
-    Saves to the audio storage directory.
+    Only the rep who owns the visit can upload audio.
     """
     result = await db.execute(select(Visita).where(Visita.id == visita_id))
     visita = result.scalar_one_or_none()
     if not visita:
-        raise HTTPException(404, "Visit not found")
+        raise HTTPException(status_code=404, detail="Visit not found")
+    if visita.vendedor_id != current_vendedor.id:
+        raise HTTPException(status_code=403, detail="Not authorized to upload audio for this visit")
 
-    # Validate file size
+    # Read and validate file size
     content = await audio.read()
     size_mb = len(content) / (1024 * 1024)
     if size_mb > settings.max_audio_size_mb:
-        raise HTTPException(413, f"Audio file too large ({size_mb:.1f}MB > {settings.max_audio_size_mb}MB)")
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio file too large ({size_mb:.1f}MB > {settings.max_audio_size_mb}MB)",
+        )
 
-    # Save file
-    ext = Path(audio.filename).suffix or ".m4a"
-    filename = f"visita_{visita_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{ext}"
+    # Validate file type via magic bytes (reject executables, scripts, etc.)
+    if not _is_valid_audio(content):
+        raise HTTPException(status_code=415, detail="Unsupported file type: must be an audio file")
+
+    # Save with a server-generated filename (no user-supplied filename in the path)
+    filename = f"visita_{visita_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.m4a"
     file_path = settings.audio_dir / filename
 
     with open(file_path, "wb") as f:
@@ -239,27 +344,30 @@ async def subir_audio(
     visita.audio_path = str(file_path)
     await db.flush()
 
-    return {"message": "Audio uploaded", "path": str(file_path), "size_mb": round(size_mb, 2)}
+    return {"message": "Audio uploaded", "size_mb": round(size_mb, 2)}
 
 
 @router.post("/visitas/{visita_id}/transcribir", response_model=VisitaResponse, tags=["visitas"])
-async def transcribir_visita(visita_id: int, db: AsyncSession = Depends(get_db)):
+async def transcribir_visita(
+    visita_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_vendedor: Vendedor = Depends(get_current_vendedor),
+):
     """
     Full AI pipeline: Transcribe audio → Extract CRM fields → Update visit + client.
-
-    This is the core of the system — it replaces the manual phone call
-    from the sales rep to the owner and the manual Excel data entry.
+    Only the rep who owns the visit can trigger transcription.
     """
     result = await db.execute(select(Visita).where(Visita.id == visita_id))
     visita = result.scalar_one_or_none()
     if not visita:
-        raise HTTPException(404, "Visit not found")
+        raise HTTPException(status_code=404, detail="Visit not found")
+    if visita.vendedor_id != current_vendedor.id:
+        raise HTTPException(status_code=403, detail="Not authorized to transcribe this visit")
 
     if not visita.audio_path:
-        raise HTTPException(400, "No audio file uploaded for this visit")
-
+        raise HTTPException(status_code=400, detail="No audio file uploaded for this visit")
     if visita.procesado:
-        raise HTTPException(400, "Visit already processed")
+        raise HTTPException(status_code=400, detail="Visit already processed")
 
     # Run AI pipeline: Audio → Transcription → Extraction
     ai_result = await process_visit_audio(visita.audio_path)
@@ -296,17 +404,15 @@ async def transcribir_visita(visita_id: int, db: AsyncSession = Depends(get_db))
 
 @router.get("/visitas/", response_model=list[VisitaResponse], tags=["visitas"])
 async def listar_visitas(
-    vendedor_id: int = None,
     cliente_id: int = None,
     procesado: bool = None,
     limit: int = Query(50, le=200),
     db: AsyncSession = Depends(get_db),
+    current_vendedor: Vendedor = Depends(get_current_vendedor),
 ):
-    """List visits with optional filters."""
-    query = select(Visita)
+    """List the authenticated rep's visits."""
+    query = select(Visita).where(Visita.vendedor_id == current_vendedor.id)
 
-    if vendedor_id:
-        query = query.where(Visita.vendedor_id == vendedor_id)
     if cliente_id:
         query = query.where(Visita.cliente_id == cliente_id)
     if procesado is not None:
@@ -317,21 +423,24 @@ async def listar_visitas(
     return result.scalars().all()
 
 
-# ============ ESTADÍSTICAS (Dashboard Stats) ============
+# ---------------------------------------------------------------------------
+# ESTADÍSTICAS (Dashboard Stats)
+# ---------------------------------------------------------------------------
 
 @router.get("/estadisticas/", response_model=EstadisticasResponse, tags=["estadisticas"])
-async def obtener_estadisticas(db: AsyncSession = Depends(get_db)):
-    """Dashboard statistics for the owner."""
+async def obtener_estadisticas(
+    db: AsyncSession = Depends(get_db),
+    _: Vendedor = Depends(get_current_vendedor),
+):
+    """Dashboard statistics. Requires authentication."""
     hoy = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     inicio_mes = hoy.replace(day=1)
 
-    # Total counts
     total_clientes = (await db.execute(select(func.count(Cliente.id)))).scalar() or 0
     total_vendedores = (await db.execute(
         select(func.count(Vendedor.id)).where(Vendedor.activo == True)
     )).scalar() or 0
 
-    # Today's activity
     llamadas_hoy = (await db.execute(
         select(func.count(Llamada.id)).where(Llamada.fecha >= hoy)
     )).scalar() or 0
@@ -340,7 +449,6 @@ async def obtener_estadisticas(db: AsyncSession = Depends(get_db)):
         select(func.count(Visita.id)).where(Visita.fecha >= hoy)
     )).scalar() or 0
 
-    # Appointment rate (calls that resulted in appointments)
     total_llamadas_mes = (await db.execute(
         select(func.count(Llamada.id)).where(Llamada.fecha >= inicio_mes)
     )).scalar() or 0
@@ -353,20 +461,17 @@ async def obtener_estadisticas(db: AsyncSession = Depends(get_db)):
 
     tasa_citas = (citas_mes / total_llamadas_mes * 100) if total_llamadas_mes > 0 else 0
 
-    # Sales this month
     ventas_mes = (await db.execute(
         select(func.count(Llamada.id)).where(
             and_(Llamada.fecha >= inicio_mes, Llamada.resultado == "venta")
         )
     )).scalar() or 0
 
-    # Clients by status
     status_query = await db.execute(
         select(Cliente.estado, func.count(Cliente.id)).group_by(Cliente.estado)
     )
     por_estado = {row[0]: row[1] for row in status_query.all()}
 
-    # Top 5 sales reps (by visits this month)
     top_query = await db.execute(
         select(Vendedor.nombre, func.count(Visita.id).label("visitas"))
         .join(Visita, Visita.vendedor_id == Vendedor.id)

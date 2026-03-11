@@ -8,7 +8,7 @@ from httpx import AsyncClient
 async def create_rep_and_client(client: AsyncClient) -> tuple[int, int]:
     """Helper: create a rep and a client, return (vendedor_id, cliente_id)."""
     rep = await client.post("/api/v1/vendedores/", json={
-        "nombre": "Test Vendedor", "telefono": "+1 (631) 555-8888"
+        "nombre": "Test Vendedor", "telefono": "+1 (631) 555-8888", "password": "secret123"
     })
     cli = await client.post("/api/v1/clientes/", json={
         "nombre_apellido": "Test Cliente", "telefono": "+1 (631) 555-7777"

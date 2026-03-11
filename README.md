@@ -125,7 +125,10 @@ pip install -r requirements.txt
 
 # Configure environment
 copy .env.example .env
-# Edit .env with your OpenAI API key
+# Edit .env — required fields:
+#   OPENAI_API_KEY=sk-...
+#   SECRET_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
+#   CORS_ORIGINS=["https://your-tunnel-domain.com"]
 
 # Initialize database
 python -m app.core.init_db
@@ -151,16 +154,40 @@ streamlit run dashboard.py
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/vendedores/` | Register a new sales rep |
-| `GET` | `/api/v1/clientes/` | List all clients |
-| `POST` | `/api/v1/clientes/sync` | Sync contacts from phone |
-| `POST` | `/api/v1/llamadas/` | Log a call result |
-| `POST` | `/api/v1/visitas/` | Create visit record |
-| `POST` | `/api/v1/visitas/{id}/audio` | Upload visit audio |
-| `POST` | `/api/v1/visitas/{id}/transcribir` | Transcribe + extract CRM fields |
-| `GET` | `/api/v1/estadisticas/` | Dashboard statistics |
+Endpoints marked 🔒 require a `Authorization: Bearer <token>` header.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| `POST` | `/api/v1/vendedores/` | Public | Register a new sales rep (requires `password`) |
+| `POST` | `/api/v1/auth/login` | Public | Login — returns JWT access token |
+| `GET` | `/api/v1/vendedores/` | 🔒 | List active sales reps |
+| `GET` | `/api/v1/clientes/` | 🔒 | List clients with optional filters |
+| `POST` | `/api/v1/clientes/` | 🔒 | Create a new client |
+| `PUT` | `/api/v1/clientes/{id}` | 🔒 | Update a client record |
+| `POST` | `/api/v1/clientes/sync` | 🔒 | Bulk sync contacts from phone |
+| `POST` | `/api/v1/llamadas/` | 🔒 | Log a call result (own rep only) |
+| `GET` | `/api/v1/llamadas/` | 🔒 | List own call history |
+| `POST` | `/api/v1/visitas/` | 🔒 | Create visit record (own rep only) |
+| `POST` | `/api/v1/visitas/{id}/audio` | 🔒 | Upload visit audio (owner only) |
+| `POST` | `/api/v1/visitas/{id}/transcribir` | 🔒 | Transcribe + extract CRM fields (owner only) |
+| `GET` | `/api/v1/visitas/` | 🔒 | List own visits |
+| `GET` | `/api/v1/estadisticas/` | 🔒 | Dashboard statistics |
+
+### Authentication Flow
+
+```bash
+# 1. Register a rep (one-time)
+curl -X POST /api/v1/vendedores/ \
+  -d '{"nombre": "Ana López", "telefono": "+1631...", "password": "my_password"}'
+
+# 2. Login to get a token
+curl -X POST /api/v1/auth/login \
+  -d '{"telefono": "+1631...", "password": "my_password"}'
+# → {"access_token": "eyJ...", "token_type": "bearer", "vendedor_id": 1}
+
+# 3. Use the token on all subsequent requests
+curl -H "Authorization: Bearer eyJ..." /api/v1/clientes/
+```
 
 ## Project Structure
 
@@ -168,55 +195,56 @@ streamlit run dashboard.py
 field-sales-crm/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI application
+│   │   ├── main.py              # FastAPI application, CORS, startup checks
 │   │   ├── core/
-│   │   │   ├── config.py        # Settings & environment
-│   │   │   ├── database.py      # SQLite + SQLAlchemy setup
+│   │   │   ├── auth.py          # JWT tokens, password hashing, get_current_vendedor
+│   │   │   ├── config.py        # Settings & environment variables
+│   │   │   ├── database.py      # SQLite + SQLAlchemy async setup
 │   │   │   └── init_db.py       # DB initialization & Excel import
 │   │   ├── models/
-│   │   │   ├── vendedor.py      # Sales rep model
-│   │   │   ├── cliente.py       # Client model
-│   │   │   ├── llamada.py       # Call log model
-│   │   │   └── visita.py        # Visit + transcription model
+│   │   │   └── models.py        # Vendedor, Cliente, Llamada, Visita
 │   │   ├── schemas/
-│   │   │   ├── vendedor.py      # Pydantic schemas
-│   │   │   ├── cliente.py
-│   │   │   ├── llamada.py
-│   │   │   └── visita.py
+│   │   │   └── schemas.py       # Pydantic request/response schemas
 │   │   ├── api/
-│   │   │   ├── vendedores.py    # Sales rep endpoints
-│   │   │   ├── clientes.py      # Client endpoints
-│   │   │   ├── llamadas.py      # Call tracking endpoints
-│   │   │   ├── visitas.py       # Visit + audio endpoints
-│   │   │   └── estadisticas.py  # Dashboard stats
+│   │   │   └── routes.py        # All API routes with auth & ownership checks
 │   │   └── services/
-│   │       ├── transcription.py # Whisper API integration
-│   │       ├── extraction.py    # GPT extraction logic
-│   │       └── sync.py          # Mobile sync logic
+│   │       └── openai_service.py# Whisper + GPT-4o-mini integration
 │   ├── dashboard.py             # Streamlit dashboard
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── tests/
+│       ├── conftest.py          # In-memory DB + auth mock fixtures
+│       ├── test_clientes.py
+│       ├── test_llamadas_visitas.py
+│       └── test_openai_service.py
 ├── mobile/                      # React Native + Expo app
 │   ├── app/                     # Expo Router screens
 │   ├── components/
 │   ├── services/
 │   └── package.json
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── API.md
-│   └── DEPLOYMENT.md
-├── scripts/
-│   ├── import_excel.py          # Import existing Excel data
-│   └── setup_tunnel.py          # Cloudflare Tunnel setup
 ├── README.md
 └── LICENSE
 ```
 
+## Security
+
+| Feature | Status |
+|---------|--------|
+| JWT authentication on all endpoints | ✅ |
+| Password hashing (pbkdf2_sha256) | ✅ |
+| Ownership checks (reps access only their own data) | ✅ |
+| Audio file validation via magic bytes | ✅ |
+| CORS locked to configured origins | ✅ |
+| API docs disabled in production | ✅ |
+| `SECRET_KEY` enforced before production startup | ✅ |
+| SQL injection in Streamlit dashboard | ⏳ Phase 2 |
+| Rate limiting on transcription endpoint | ⏳ Phase 2 |
+| Audit logging | ⏳ Phase 2 |
+
 ## Roadmap
 
 - [x] Project architecture & documentation
-- [ ] **Phase 1**: Backend API (FastAPI + SQLite + models)
+- [x] **Phase 1**: Backend API (FastAPI + SQLite + models) + Security hardening
 - [ ] **Phase 2**: OpenAI integration (Whisper + GPT extraction)
 - [ ] **Phase 3**: Mobile app (contacts + calls + GPS)
 - [ ] **Phase 4**: Audio recording + upload + transcription

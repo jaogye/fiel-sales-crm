@@ -30,6 +30,7 @@ class Vendedor(Base):
     zona = Column(String(100), nullable=True)
     activo = Column(Boolean, default=True)
     device_id = Column(String(100), nullable=True)  # Mobile device identifier
+    password_hash = Column(String(200), nullable=True)  # bcrypt hash
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

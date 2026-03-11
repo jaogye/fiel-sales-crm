@@ -1,7 +1,7 @@
 """
 Shared test fixtures — in-memory SQLite for fast isolated tests.
 """
-import asyncio
+from types import SimpleNamespace
 from typing import AsyncGenerator
 
 import pytest
@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.database import Base, get_db
+from app.core.auth import get_current_vendedor
 from app.main import app
 
 # In-memory SQLite for tests (fast, isolated, no cleanup needed)
@@ -17,6 +18,10 @@ TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
 
 test_engine = create_async_engine(TEST_DB_URL, echo=False)
 test_session = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+
+# Mock vendedor returned by get_current_vendedor in all tests.
+# id=1 matches the first vendedor created in each test's fresh database.
+_mock_vendedor = SimpleNamespace(id=1, activo=True, nombre="Test Auth")
 
 
 @pytest_asyncio.fixture
@@ -34,12 +39,16 @@ async def db() -> AsyncGenerator[AsyncSession, None]:
 
 @pytest_asyncio.fixture
 async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    """Provide an async HTTP test client with overridden DB dependency."""
+    """Provide an async HTTP test client with overridden DB and auth dependencies."""
 
     async def override_get_db():
         yield db
 
+    async def override_get_current_vendedor():
+        return _mock_vendedor
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_vendedor] = override_get_current_vendedor
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

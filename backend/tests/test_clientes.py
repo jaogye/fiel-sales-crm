@@ -15,6 +15,7 @@ class TestVendedores:
             "nombre": "Carlos Martinez",
             "telefono": "+1 (631) 555-0101",
             "zona": "Long Island",
+            "password": "secret123",
         })
         assert response.status_code == 200
         data = response.json()
@@ -26,10 +27,10 @@ class TestVendedores:
     async def test_listar_vendedores(self, client: AsyncClient):
         # Create two reps
         await client.post("/api/v1/vendedores/", json={
-            "nombre": "Ana López", "telefono": "+1 (631) 555-0201"
+            "nombre": "Ana López", "telefono": "+1 (631) 555-0201", "password": "secret123"
         })
         await client.post("/api/v1/vendedores/", json={
-            "nombre": "Pedro Ruiz", "telefono": "+1 (631) 555-0202"
+            "nombre": "Pedro Ruiz", "telefono": "+1 (631) 555-0202", "password": "secret123"
         })
 
         response = await client.get("/api/v1/vendedores/")
@@ -63,7 +64,7 @@ class TestClientes:
         await client.post("/api/v1/clientes/", json=payload)
         response = await client.post("/api/v1/clientes/", json=payload)
         assert response.status_code == 400
-        assert "already exists" in response.json()["detail"]
+        assert "already registered" in response.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_actualizar_cliente(self, client: AsyncClient):
@@ -113,7 +114,7 @@ class TestClientes:
     async def test_sync_contactos(self, client: AsyncClient):
         # Create a rep first
         rep_resp = await client.post("/api/v1/vendedores/", json={
-            "nombre": "Maria Garcia", "telefono": "+1 (631) 555-9999"
+            "nombre": "Maria Garcia", "telefono": "+1 (631) 555-9999", "password": "secret123"
         })
         rep_id = rep_resp.json()["id"]
 

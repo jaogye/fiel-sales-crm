@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
-    debug: bool = True
+    debug: bool = False
 
     # Audio storage
     audio_storage_path: str = "C:/ventas/audios"
@@ -30,7 +30,10 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = "change-this-to-a-random-string-in-production"
-    api_key_header: str = "X-API-Key"
+    access_token_expire_minutes: int = 43200  # 30 days (mobile-friendly)
+
+    # CORS — comma-separated origins or JSON array in env
+    cors_origins: list[str] = ["http://localhost:8501", "http://localhost:3000"]
 
     model_config = {
         "env_file": ".env",

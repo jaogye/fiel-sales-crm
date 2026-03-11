@@ -11,8 +11,20 @@ from pydantic import BaseModel, Field
 class VendedorCreate(BaseModel):
     nombre: str = Field(..., min_length=1, max_length=200)
     telefono: str = Field(..., pattern=r"^\+?[\d\s\-\(\)]+$")
+    password: str = Field(..., min_length=6, max_length=100)
     zona: Optional[str] = None
     device_id: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    telefono: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    vendedor_id: int
 
 
 class VendedorResponse(BaseModel):
@@ -115,7 +127,6 @@ class VisitaResponse(BaseModel):
     fecha: datetime
     lat: Optional[float]
     lng: Optional[float]
-    audio_path: Optional[str]
     duracion_min: Optional[float]
     transcripcion: Optional[str]
     idioma_detectado: Optional[str]
