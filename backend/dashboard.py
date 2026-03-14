@@ -8,9 +8,13 @@ Usage:
     cd backend
     streamlit run dashboard.py
 """
+import secrets
 import sqlite3
-from datetime import datetime, timedelta
+import string
+from datetime import datetime
 from pathlib import Path
+
+from passlib.context import CryptContext
 
 import pandas as pd
 import plotly.express as px
@@ -26,8 +30,19 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Database path — same as FastAPI
-DB_PATH = Path("C:/ventas/crm.db")
+# Database path — same as FastAPI (Fly.io persistent volume)
+DB_PATH = Path("/data/crm.db")
+
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def generate_password(length: int = 10) -> str:
+    chars = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(chars) for _ in range(length))
 
 
 @st.cache_resource
@@ -37,6 +52,14 @@ def get_connection():
         st.error(f"Database not found at {DB_PATH}. Run the backend first to create it.")
         st.stop()
     return sqlite3.connect(str(DB_PATH), check_same_thread=False)
+
+
+def write_db(sql: str, params: tuple = ()):
+    """Execute a write query on a fresh connection."""
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.execute(sql, params)
+    conn.commit()
+    conn.close()
 
 
 def query(sql: str, params: tuple = ()) -> pd.DataFrame:
@@ -383,6 +406,160 @@ if not recent_visits.empty:
     st.dataframe(recent_visits, use_container_width=True, height=400)
 else:
     st.info("No hay visitas transcritas aún. Las transcripciones aparecerán aquí automáticamente.")
+
+st.markdown("---")
+
+# ---- HISTORIAL DE CLIENTE ----
+st.subheader("📁 Historial de Cliente")
+
+all_clients = query("SELECT id, nombre_apellido, telefono FROM clientes ORDER BY nombre_apellido")
+client_options = {"— Seleccionar cliente —": None}
+for _, row in all_clients.iterrows():
+    client_options[f"{row['nombre_apellido']} ({row['telefono']})"] = row["id"]
+
+selected_client_label = st.selectbox("Cliente:", list(client_options.keys()))
+selected_client_id = client_options[selected_client_label]
+
+if selected_client_id:
+    hist_tab_visits, hist_tab_calls = st.tabs(["🚗 Visitas", "📞 Llamadas"])
+
+    with hist_tab_visits:
+        visits_hist = query(f"""
+            SELECT
+                v.fecha as 'Fecha',
+                ve.nombre as 'Vendedor',
+                v.notas_vendedor as 'Notas',
+                v.resultados as 'Resultado',
+                v.nivel_interes as 'Interés',
+                v.siguiente_paso as 'Siguiente Paso',
+                v.estado_sugerido as 'Estado Sugerido',
+                v.objeciones as 'Objeciones',
+                v.transcripcion as 'Transcripción'
+            FROM visitas v
+            JOIN vendedores ve ON v.vendedor_id = ve.id
+            WHERE v.cliente_id = {selected_client_id}
+            ORDER BY v.fecha DESC
+        """)
+        if not visits_hist.empty:
+            st.caption(f"{len(visits_hist)} visita(s) registrada(s)")
+            st.dataframe(visits_hist, use_container_width=True)
+            st.markdown("")
+            if st.button("🗑️ Eliminar todo el historial de visitas", key="del_visits", type="primary"):
+                audio_paths = query(f"SELECT audio_path FROM visitas WHERE cliente_id = {selected_client_id} AND audio_path IS NOT NULL")
+                for _, row in audio_paths.iterrows():
+                    try:
+                        Path(row["audio_path"]).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                write_db("DELETE FROM visitas WHERE cliente_id = ?", (selected_client_id,))
+                st.success("Historial de visitas eliminado.")
+                st.cache_resource.clear()
+                st.rerun()
+        else:
+            st.info("Sin visitas registradas para este cliente.")
+
+    with hist_tab_calls:
+        calls_hist = query(f"""
+            SELECT
+                l.fecha as 'Fecha',
+                ve.nombre as 'Vendedor',
+                l.resultado as 'Resultado',
+                l.duracion_seg as 'Duración (seg)',
+                l.notas_telemarketing as 'Notas'
+            FROM llamadas l
+            JOIN vendedores ve ON l.vendedor_id = ve.id
+            WHERE l.cliente_id = {selected_client_id}
+            ORDER BY l.fecha DESC
+        """)
+        if not calls_hist.empty:
+            st.caption(f"{len(calls_hist)} llamada(s) registrada(s)")
+            st.dataframe(calls_hist, use_container_width=True)
+            st.markdown("")
+            if st.button("🗑️ Eliminar todo el historial de llamadas", key="del_calls", type="primary"):
+                write_db("DELETE FROM llamadas WHERE cliente_id = ?", (selected_client_id,))
+                st.success("Historial de llamadas eliminado.")
+                st.cache_resource.clear()
+                st.rerun()
+        else:
+            st.info("Sin llamadas registradas para este cliente.")
+
+st.markdown("---")
+
+# ---- GESTIÓN DE VENDEDORES ----
+st.subheader("👥 Gestión de Vendedores")
+
+active_reps_df = query("SELECT id, nombre, telefono, zona, created_at FROM vendedores WHERE activo = 1 ORDER BY nombre")
+if not active_reps_df.empty:
+    st.dataframe(active_reps_df.rename(columns={
+        "id": "ID", "nombre": "Nombre", "telefono": "Teléfono",
+        "zona": "Zona", "created_at": "Creado",
+    }), use_container_width=True, hide_index=True)
+else:
+    st.info("No hay vendedores activos.")
+
+mgmt_col1, mgmt_col2, mgmt_col3 = st.columns(3)
+
+# --- Nuevo vendedor ---
+with mgmt_col1:
+    with st.expander("➕ Nuevo Vendedor"):
+        with st.form("form_nuevo_vendedor"):
+            nv_nombre = st.text_input("Nombre completo")
+            nv_telefono = st.text_input("Teléfono")
+            nv_zona = st.text_input("Zona (opcional)")
+            nv_password = st.text_input("Contraseña inicial", type="password")
+            nv_submit = st.form_submit_button("Crear", use_container_width=True)
+
+        if nv_submit:
+            if nv_nombre and nv_telefono and nv_password:
+                if len(nv_password) < 6:
+                    st.error("La contraseña debe tener al menos 6 caracteres.")
+                else:
+                    existing = query("SELECT id FROM vendedores WHERE telefono = ?", (nv_telefono,))
+                    if not existing.empty:
+                        st.error("Ya existe un vendedor con ese teléfono.")
+                    else:
+                        write_db(
+                            "INSERT INTO vendedores (nombre, telefono, zona, password_hash, activo, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+                            (nv_nombre, nv_telefono, nv_zona or None, hash_password(nv_password), datetime.utcnow()),
+                        )
+                        st.success(f"Vendedor '{nv_nombre}' creado.")
+                        st.cache_resource.clear()
+                        st.rerun()
+            else:
+                st.warning("Nombre, teléfono y contraseña son obligatorios.")
+
+# --- Eliminar vendedor ---
+with mgmt_col2:
+    with st.expander("🗑️ Eliminar Vendedor"):
+        if not active_reps_df.empty:
+            del_options = {f"{r['nombre']} ({r['telefono']})": r["id"] for _, r in active_reps_df.iterrows()}
+            del_sel = st.selectbox("Vendedor:", list(del_options.keys()), key="del_sel")
+            st.warning("Esto desactiva al vendedor. Sus datos históricos se conservan.")
+            if st.button("Desactivar", type="primary", use_container_width=True):
+                write_db("UPDATE vendedores SET activo = 0 WHERE id = ?", (del_options[del_sel],))
+                st.success("Vendedor desactivado.")
+                st.cache_resource.clear()
+                st.rerun()
+        else:
+            st.info("No hay vendedores activos.")
+
+# --- Resetear password ---
+with mgmt_col3:
+    with st.expander("🔑 Resetear Password"):
+        if not active_reps_df.empty:
+            reset_options = {f"{r['nombre']} ({r['telefono']})": r["id"] for _, r in active_reps_df.iterrows()}
+            reset_sel = st.selectbox("Vendedor:", list(reset_options.keys()), key="reset_sel")
+            if st.button("Generar nueva contraseña", use_container_width=True):
+                new_pass = generate_password()
+                write_db(
+                    "UPDATE vendedores SET password_hash = ? WHERE id = ?",
+                    (hash_password(new_pass), reset_options[reset_sel]),
+                )
+                st.success("Nueva contraseña generada:")
+                st.code(new_pass, language=None)
+                st.caption("Comunica esta contraseña al vendedor. Solo se muestra una vez.")
+        else:
+            st.info("No hay vendedores activos.")
 
 # ---- FOOTER ----
 st.markdown("---")

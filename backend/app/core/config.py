@@ -9,8 +9,8 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = ""
 
-    # Database
-    database_path: str = "C:/ventas/crm.db"
+    # Database — /data is the Fly.io persistent volume mount point
+    database_path: str = "/data/crm.db"
 
     # Server
     host: str = "0.0.0.0"
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # Audio storage
-    audio_storage_path: str = "C:/ventas/audios"
+    audio_storage_path: str = "/data/audios"
 
     # AI Models
     whisper_model: str = "whisper-1"

@@ -108,7 +108,7 @@ The schema maps directly to the client's existing Excel spreadsheet:
 - OpenAI API key
 - Windows 10/11 (backend) — also works on macOS/Linux
 
-### Backend Setup
+### Backend Setup (local / development)
 
 ```bash
 # Clone the repository
@@ -129,12 +129,52 @@ copy .env.example .env
 #   OPENAI_API_KEY=sk-...
 #   SECRET_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
 #   CORS_ORIGINS=["https://your-tunnel-domain.com"]
+#   DATABASE_PATH=C:/ventas/crm.db      ← override for local Windows paths
+#   AUDIO_STORAGE_PATH=C:/ventas/audios
 
 # Initialize database
 python -m app.core.init_db
 
 # Run the server
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Backend Setup (Fly.io — production, 24/7)
+
+```bash
+# Install flyctl (one time)
+# Windows: https://fly.io/install.ps1
+# macOS/Linux: curl -L https://fly.io/install.sh | sh
+
+# Login
+fly auth login
+
+# From the backend/ directory
+cd field-sales-crm/backend
+
+# Launch the app (only the first time — generates fly.toml)
+fly launch --name field-sales-crm --region ewr --no-deploy
+
+# Create a 5GB persistent volume for SQLite DB + audio files
+fly volumes create crm_data --region ewr --size 5
+
+# Set secrets (never stored in code or .env)
+fly secrets set SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+fly secrets set OPENAI_API_KEY=sk-...
+fly secrets set CORS_ORIGINS='["https://field-sales-crm.fly.dev"]'
+
+# Deploy
+fly deploy
+
+# Check it's running
+fly status
+fly logs
+```
+
+After deploy, your API is live at `https://field-sales-crm.fly.dev`.
+Update the mobile app's production URL in `mobile/services/api.js`:
+```javascript
+: 'https://field-sales-crm.fly.dev'
 ```
 
 ### Mobile App Setup
